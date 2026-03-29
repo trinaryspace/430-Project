@@ -3,7 +3,7 @@ import argparse
 import numpy as np
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtWidgets
-from processing_helper import ca_cfar_1d, Tracker
+from processing_helper import ca_cfar_1d, Tracker, analyze_frame
 
 # ==========================================
 # SECTION 1: PARSING
@@ -244,103 +244,24 @@ class RadarPlayer(QtWidgets.QMainWindow):
             self.fft_curve_rx1.setData(x_axis, fft_rx1)
             x_for_cfar = x_axis
             
-        # CFAR and Tracking on averaged Rx0 and Rx1
-        avg_fft = (fft_rx0 + fft_rx1) / 2.0
-        # Use ~40 bin peak width -> 30 guard, 40 train, 15dB threshold
-        det_bins = ca_cfar_1d(avg_fft, guard_cells=40, train_cells=80, threshold_factor=6.50)
-        
-        # Ignore frequencies between -150 kHz and 150 kHz (clutter)
-        actual_freqs = np.fft.fftshift(self.freq_axis)
-        det_bins = [i for i in det_bins if abs(actual_freqs[i]) > 150000.0]
-        
-        det_x = np.array([x_for_cfar[i] for i in det_bins])
-        det_y = np.array([avg_fft[i] for i in det_bins])
+        # Call shared analyze_frame function
+        det_x, det_y, tracks, tags_this_frame, self.active_tags, self.next_tag_id, avg_fft = analyze_frame(
+            fft_rx0, fft_rx1, fft_comp_rx0, fft_comp_rx1, 
+            self.freq_axis, x_for_cfar, self.params, 
+            self.tracker, self.active_tags, self.next_tag_id
+        )
         
         if len(det_x) > 0:
             self.det_scatter.setData(det_x, det_y)
         else:
             self.det_scatter.setData([], [])
-            
-        c = 299792458
-        fs = float(self.params.get('Sampling_Frequency_kHz', 0)) * 1000
-        bw_khz = float(self.params.get('Upper_RF_Frequency_kHz', 0)) - float(self.params.get('Lower_RF_Frequency_kHz', 0))
-        tc_sec = float(self.params.get('Chirp_Time_sec', 0))
-        slope = (bw_khz * 1000) / tc_sec if tc_sec > 0 else 1
-            
-        detections = []
-        for i, bin_idx in enumerate(det_bins):
-            # Phase Difference Calculation
-            rx0_c = fft_comp_rx0[bin_idx]
-            rx1_c = fft_comp_rx1[bin_idx]
-            phase_diff = np.angle(rx1_c * np.conj(rx0_c)) + 2.39 #needs some correction factor?
-            sin_theta = np.clip(phase_diff / np.pi, -1.0, 1.0)
-            angle_deg = np.degrees(np.arcsin(sin_theta))
-            
-            freq_val = abs(actual_freqs[bin_idx])
-            range_val = (c * freq_val) / (2 * slope)
-            
-            detections.append({
-                'pos': det_x[i],
-                'range': range_val,
-                'freq': freq_val,
-                'angle': angle_deg,
-                'mag': avg_fft[bin_idx]
-            })
-            
-        tracks = self.tracker.update(detections)
+                
         trk_x = [t.pos for t in tracks]
         max_y = np.max(avg_fft) if len(avg_fft) > 0 else 0
         trk_y = [max_y] * len(trk_x)
         
         if len(trk_x) > 0:
             self.trk_scatter.setData(trk_x, trk_y)
-            
-            # --- Tag Detection Logic ---
-            from itertools import combinations
-            from processing_helper import TargetTrack
-            
-            MAG_THRESHOLD = 3.0
-            ANGLE_THRESHOLD = 5.0
-            
-            for t in tracks:
-                t.is_part_of_tag = False
-                
-            tags_this_frame = []
-            current_frame_tag_keys = set()
-            
-            for t1, t2 in combinations(tracks, 2):
-                if abs(t1.mag - t2.mag) <= MAG_THRESHOLD and abs(t1.angle - t2.angle) <= ANGLE_THRESHOLD:
-                    t1.is_part_of_tag = True
-                    t2.is_part_of_tag = True
-                    
-                    pair_key = tuple(sorted((t1.target_id, t2.target_id)))
-                    current_frame_tag_keys.add(pair_key)
-                    
-                    if pair_key not in self.active_tags:
-                        self.active_tags[pair_key] = self.next_tag_id
-                        self.next_tag_id += 1
-                        
-                    tag_id = self.active_tags[pair_key]
-                    mod_freq = (t1.freq_val + t2.freq_val) / 2.0
-                    fb = 1.0 * abs(t1.freq_val - t2.freq_val)
-                    tag_range = (c * fb) / (2 * slope) if slope > 0 else 0
-                    tag_angle = (t1.angle + t2.angle) / 2.0
-                    tag_pos = (t1.pos + t2.pos) / 2.0
-                    
-                    tag_obj = TargetTrack(
-                        target_id=tag_id,
-                        pos=tag_pos,
-                        dt=0.1,
-                        range_val=tag_range,
-                        freq_val=fb,
-                        angle=tag_angle,
-                        mag=(t1.mag + t2.mag) / 2.0,
-                        is_tag=True,
-                        mod_freq=mod_freq
-                    )
-                    tags_this_frame.append(tag_obj)
-                    
-            self.active_tags = {k: v for k, v in self.active_tags.items() if k in current_frame_tag_keys}
             
             print(f"--- Frame {self.current_frame:04d} ---")
             for t in tracks:
