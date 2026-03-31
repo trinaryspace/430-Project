@@ -166,7 +166,7 @@ def analyze_frame(fft_rx0, fft_rx1, fft_comp_rx0, fft_comp_rx1, freq_axis, x_for
         rx1_c = fft_comp_rx1[bin_idx]
         phase_diff = np.angle(rx1_c * np.conj(rx0_c)) # correction factor needed 2.39?
         sin_theta = np.clip(phase_diff / np.pi, -1.0, 1.0)
-        angle_deg = np.degrees(np.arcsin(sin_theta))
+        angle_deg = np.degrees(np.arcsin(sin_theta)) +63
         print("pre-tracked target angle: ", angle_deg)
         
         freq_val = abs(actual_freqs[bin_idx])
@@ -183,7 +183,7 @@ def analyze_frame(fft_rx0, fft_rx1, fft_comp_rx0, fft_comp_rx1, freq_axis, x_for
     tracks = tracker.update(detections)
     
     MAG_THRESHOLD = 3.0
-    ANGLE_THRESHOLD = 5.0
+    ANGLE_THRESHOLD = 10.0
     
     for t in tracks:
         t.is_part_of_tag = False
@@ -224,7 +224,7 @@ def analyze_frame(fft_rx0, fft_rx1, fft_comp_rx0, fft_comp_rx1, freq_axis, x_for
             tag_range = abs(t1.range_val - t2.range_val) / 2.0
             tag_freq_mid = (t1.range_val + t2.range_val) / 2.0 
             mod_freq = (2 * tag_freq_mid * slope) / c if slope > 0 else 0
-            tag_angle = (abs(t1.angle) + abs(t2.angle)) / 2.0
+            tag_angle = (t1.angle + t2.angle) / 2.0
             tag_pos = abs(t1.pos - t2.pos) / 2.0
             
             tag_obj = TargetTrack(

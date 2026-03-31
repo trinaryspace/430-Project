@@ -2,9 +2,11 @@ import sys
 import os
 import time
 import argparse
+import json
+import datetime
 import numpy as np
 import pyqtgraph as pg
-from pyqtgraph.Qt import QtCore, QtWidgets
+from pyqtgraph.Qt import QtCore, QtWidgets, QtGui
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
@@ -60,6 +62,12 @@ class RealtimeRadarApp(QtWidgets.QMainWindow):
         self.active_tags = {}
         self.frame_counter = 0
         
+        # Create a session-specific JSON log directory
+        session_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.json_log_dir = os.path.join("json logs", f"session_{session_timestamp}")
+        os.makedirs(self.json_log_dir, exist_ok=True)
+        print(f"Logging JSON data to: {self.json_log_dir}")
+        
         self.initUI()
         
     def initUI(self):
@@ -67,6 +75,8 @@ class RealtimeRadarApp(QtWidgets.QMainWindow):
         self.cw = pg.GraphicsLayoutWidget()
         self.setCentralWidget(self.cw)
         self.resize(1000, 700)
+        
+        self.setup_polar_plot()
         
         # Setup Raw Data Plot (Time Domain)
         self.raw_plot = self.cw.addPlot(title="Raw Data - Rx0")
@@ -96,6 +106,82 @@ class RealtimeRadarApp(QtWidgets.QMainWindow):
         self.trk_scatter = pg.ScatterPlotItem(size=12, pen=pg.mkPen('b', width=2), brush=None, symbol='+', name="Tracks")
         self.fft_plot.addItem(self.det_scatter)
         self.fft_plot.addItem(self.trk_scatter)
+
+    def setup_polar_plot(self):
+        self.polar_win = pg.GraphicsLayoutWidget(title="Polar Plot")
+        self.polar_win.resize(600, 500)
+        self.polar_win.setWindowTitle("Tracked Tags - Polar Map")
+        self.polar_plot = self.polar_win.addPlot(title="Range-Angle Map (10m)")
+        self.polar_plot.hideAxis('bottom')
+        self.polar_plot.hideAxis('left')
+        self.polar_plot.setRange(xRange=[-11, 11], yRange=[0, 11], padding=0.0)
+        self.polar_plot.setAspectLocked(True)
+
+        for r in range(2, 12, 2):
+            theta = np.linspace(-np.pi/2, np.pi/2, 100)
+            x = -r * np.sin(theta)
+            y = r * np.cos(theta)
+            self.polar_plot.plot(x, y, pen=pg.mkPen('gray', width=1, style=QtCore.Qt.DashLine))
+            text = pg.TextItem(f"{r}", color='gray', anchor=(0.5, 1))
+            self.polar_plot.addItem(text)
+            text.setPos(r, 0)
+            
+        angles = [-90, -60, -30, 0, 30, 60, 90]
+        for a in angles:
+            rad_a = np.radians(a)
+            x_line = [0, -10 * np.sin(rad_a)]
+            y_line = [0, 10 * np.cos(rad_a)]
+            self.polar_plot.plot(x_line, y_line, pen=pg.mkPen('gray', width=1, style=QtCore.Qt.DashLine))
+            text = pg.TextItem(f"{a}°", color='gray', anchor=(0.5, 0.5))
+            self.polar_plot.addItem(text)
+            text.setPos(-10.5 * np.sin(rad_a), 10.5 * np.cos(rad_a))
+
+        range_label = pg.TextItem("Range [m]", color='gray', anchor=(0.5, 0))
+        self.polar_plot.addItem(range_label)
+        range_label.setPos(8, -1.0)
+
+        angle_label = pg.TextItem("Angle [°]", color='gray', anchor=(0.5, 1))
+        self.polar_plot.addItem(angle_label)
+        angle_label.setPos(0, 11)
+
+        self.tag_polar_scatter = pg.ScatterPlotItem(size=15, pen=pg.mkPen('black'), brush=pg.mkBrush('b'), name="Tags")
+        self.polar_plot.addItem(self.tag_polar_scatter)
+        self.polar_win.show()
+
+    def closeEvent(self, event):
+        if hasattr(self, 'polar_win'):
+            self.polar_win.close()
+        super().closeEvent(event)
+
+    def export_tags_per_frame_to_json(self, tags, frame_idx):
+        """Exports tracked tags to a JSON file stamped with the current time for this frame."""
+        current_time = datetime.datetime.now()
+        timestamp_str = current_time.strftime("%Y%m%d_%H%M%S_%f")[:-3]  # up to milliseconds
+        
+        data = {
+            "frame": frame_idx,
+            "timestamp": timestamp_str,
+            "num_tags": len(tags),
+            "tags": [
+                {
+                    "id": tag.target_id,
+                    "range_m": round(tag.range_val, 4),
+                    "angle_deg": round(tag.angle, 4),
+                    "mod_freq_hz": round(tag.mod_freq, 4),
+                    "magnitude_db": round(tag.mag, 4)
+                } for tag in tags
+            ]
+        }
+        
+        # Write out to a new JSON file for the frame
+        filename = f"frame_{frame_idx:04d}_{timestamp_str}.json"
+        filepath = os.path.join(self.json_log_dir, filename)
+        
+        try:
+            with open(filepath, 'w') as f:
+                json.dump(data, f, indent=4)
+        except Exception as e:
+            print(f"Error writing JSON for frame {frame_idx}: {e}")
 
     @QtCore.pyqtSlot(str)
     def process_new_file(self, filepath):
@@ -163,8 +249,25 @@ class RealtimeRadarApp(QtWidgets.QMainWindow):
                 for tag in tags_this_frame:
                     print(f" [TAG] ID {tag.target_id:2d}: Range = {tag.range_val:5.2f}m, "
                           f"Mod Freq = {tag.mod_freq:8.1f}Hz, Angle = {tag.angle:6.2f}deg, Mag = {tag.mag:5.1f}dB")
+                          
+                polar_pts = []
+                for tag in tags_this_frame:
+                    r = tag.range_val if tag.range_val <= 10.0 else 10.0
+                    rad_a = np.radians(tag.angle)
+                    x = -r * np.sin(rad_a)
+                    y = r * np.cos(rad_a)
+                    polar_pts.append({'pos': (x, y)})
+                
+                if len(polar_pts) > 0:
+                    self.tag_polar_scatter.setData(polar_pts)
+                else:
+                    self.tag_polar_scatter.setData([])
             else:
                 self.trk_scatter.setData([], [])
+                self.tag_polar_scatter.setData([])
+            
+            # Export the tags for this frame to JSON
+            self.export_tags_per_frame_to_json(tags_this_frame, self.frame_counter)
             
             self.frame_counter += 1
             

@@ -2,7 +2,7 @@ import sys
 import argparse
 import numpy as np
 import pyqtgraph as pg
-from pyqtgraph.Qt import QtCore, QtWidgets
+from pyqtgraph.Qt import QtCore, QtWidgets, QtGui
 from processing_helper import ca_cfar_1d, Tracker, analyze_frame
 
 # ==========================================
@@ -167,6 +167,8 @@ class RadarPlayer(QtWidgets.QMainWindow):
         self.setCentralWidget(self.cw)
         self.resize(1000, 700)
         
+        self.setup_polar_plot()
+        
         # Setup Raw Data Plot (Time Domain)
         self.raw_plot = self.cw.addPlot(title="Raw Data - Rx0")
         self.raw_plot.addLegend()
@@ -201,6 +203,52 @@ class RadarPlayer(QtWidgets.QMainWindow):
         self.timer.timeout.connect(self.update_plots)
         self.timer.start(100) # Update every 100 ms (10 FPS)
         
+    def setup_polar_plot(self):
+        self.polar_win = pg.GraphicsLayoutWidget(title="Polar Plot")
+        self.polar_win.resize(600, 500)
+        self.polar_win.setWindowTitle("Tracked Tags - Polar Map")
+        self.polar_plot = self.polar_win.addPlot(title="Range-Angle Map (10m)")
+        self.polar_plot.hideAxis('bottom')
+        self.polar_plot.hideAxis('left')
+        self.polar_plot.setRange(xRange=[-11, 11], yRange=[0, 11], padding=0.0)
+        self.polar_plot.setAspectLocked(True)
+
+        for r in range(2, 12, 2):
+            theta = np.linspace(-np.pi/2, np.pi/2, 100)
+            x = -r * np.sin(theta)
+            y = r * np.cos(theta)
+            self.polar_plot.plot(x, y, pen=pg.mkPen('gray', width=1, style=QtCore.Qt.DashLine))
+            text = pg.TextItem(f"{r}", color='gray', anchor=(0.5, 1))
+            self.polar_plot.addItem(text)
+            text.setPos(r, 0)
+            
+        angles = [-90, -60, -30, 0, 30, 60, 90]
+        for a in angles:
+            rad_a = np.radians(a)
+            x_line = [0, -10 * np.sin(rad_a)]
+            y_line = [0, 10 * np.cos(rad_a)]
+            self.polar_plot.plot(x_line, y_line, pen=pg.mkPen('gray', width=1, style=QtCore.Qt.DashLine))
+            text = pg.TextItem(f"{a}°", color='gray', anchor=(0.5, 0.5))
+            self.polar_plot.addItem(text)
+            text.setPos(-10.5 * np.sin(rad_a), 10.5 * np.cos(rad_a))
+            
+        range_label = pg.TextItem("Range [m]", color='gray', anchor=(0.5, 0))
+        self.polar_plot.addItem(range_label)
+        range_label.setPos(8, -1.0)
+
+        angle_label = pg.TextItem("Angle [°]", color='gray', anchor=(0.5, 1))
+        self.polar_plot.addItem(angle_label)
+        angle_label.setPos(0, 11)
+
+        self.tag_polar_scatter = pg.ScatterPlotItem(size=15, pen=pg.mkPen('black'), brush=pg.mkBrush('b'), name="Tags")
+        self.polar_plot.addItem(self.tag_polar_scatter)
+        self.polar_win.show()
+
+    def closeEvent(self, event):
+        if hasattr(self, 'polar_win'):
+            self.polar_win.close()
+        super().closeEvent(event)
+
     def keyPressEvent(self, event):
         if event.key() == QtCore.Qt.Key_Space:
             self.is_paused = not self.is_paused
@@ -272,8 +320,22 @@ class RadarPlayer(QtWidgets.QMainWindow):
             for tag in tags_this_frame:
                 print(f" [TAG] ID {tag.target_id:2d}: Range = {tag.range_val:5.2f}m, "
                       f"Mod Freq = {tag.mod_freq:8.1f}Hz, Angle = {tag.angle:6.2f}deg, Mag = {tag.mag:5.1f}dB")
+                      
+            polar_pts = []
+            for tag in tags_this_frame:
+                r = tag.range_val if tag.range_val <= 10.0 else 10.0
+                rad_a = np.radians(tag.angle)
+                x = -r * np.sin(rad_a)
+                y = r * np.cos(rad_a)
+                polar_pts.append({'pos': (x, y)})
+            
+            if len(polar_pts) > 0:
+                self.tag_polar_scatter.setData(polar_pts)
+            else:
+                self.tag_polar_scatter.setData([])
         else:
             self.trk_scatter.setData([], [])
+            self.tag_polar_scatter.setData([])
         
         self.current_frame += 1
 
